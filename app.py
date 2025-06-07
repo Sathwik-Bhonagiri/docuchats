@@ -15,13 +15,26 @@ logger = logging.getLogger(__name__)
 
 # Initialize environment
 def setup_environment():
-    if not os.getenv("GOOGLE_API_KEY"):
+    # Check Streamlit secrets first
+    if "GOOGLE_API_KEY" in st.secrets:
+        os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
+        return st.secrets["GOOGLE_API_KEY"]
+    
+    # Then check environment variables
+    if api_key := os.getenv("GOOGLE_API_KEY"):
+        return api_key
+    
+    # Finally try .env file
+    try:
         from dotenv import load_dotenv
         load_dotenv()
-    api_key = os.getenv("GOOGLE_API_KEY")
-    assert api_key, "Google API Key not found in environment variables!"
-    os.environ["GOOGLE_API_KEY"] = api_key
-    return api_key
+        if api_key := os.getenv("GOOGLE_API_KEY"):
+            return api_key
+    except:
+        pass
+    
+    st.error("Google API Key not found! Add it to Streamlit secrets.")
+    st.stop()
 
 # PDF Processing Functions
 def extract_pdf_text(pdf_files):
@@ -44,15 +57,13 @@ def chunk_text(text, chunk_size=800, chunk_overlap=150):
     return splitter.split_text(text)
 
 def create_vector_store(text_chunks):
-    """Create and save FAISS vector store safely"""
+    """Create FAISS vector store in memory"""
     embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
-    vector_store.save_local("pdf_faiss_index")
-    return vector_store
+    return FAISS.from_texts(text_chunks, embedding=embeddings)
 
 # QA System Setup
-def setup_qa_chain(model_name="gemini-1.5-flash"):
-    """Create retrieval-based QA system with safe loading"""
+def setup_qa_chain(vector_store, model_name="gemini-1.5-flash"):
+    """Create retrieval-based QA system"""
     prompt_template = """
     Answer the question concisely based only on the following context. 
     If the answer isn't in the context, say "I couldn't find that in the document."
@@ -75,15 +86,6 @@ def setup_qa_chain(model_name="gemini-1.5-flash"):
     prompt = PromptTemplate(
         template=prompt_template,
         input_variables=["context", "question"]
-    )
-    
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    
-    # Load vector store with safe deserialization
-    vector_store = FAISS.load_local(
-        "pdf_faiss_index", 
-        embeddings, 
-        allow_dangerous_deserialization=True
     )
     
     return RetrievalQA.from_chain_type(
@@ -109,6 +111,7 @@ def main():
     # Initialize session state
     if "processed" not in st.session_state:
         st.session_state.processed = False
+        st.session_state.vector_store = None
         st.session_state.qa_chain = None
         st.session_state.quota_warning = False
         st.session_state.model_name = "gemini-1.5-flash"
@@ -149,7 +152,7 @@ def main():
                 text_chunks = chunk_text(raw_text)
                 
                 st.write("🧠 Creating knowledge base...")
-                create_vector_store(text_chunks)
+                st.session_state.vector_store = create_vector_store(text_chunks)
                 
                 st.session_state.processed = True
                 st.session_state.quota_warning = False
@@ -168,13 +171,16 @@ def main():
                 "Upgrade at [Google AI Studio](https://aistudio.google.com/)")
 
     # Main chat interface
-    if st.session_state.processed:
+    if st.session_state.processed and st.session_state.vector_store:
         if not st.session_state.qa_chain:
             try:
-                st.session_state.qa_chain = setup_qa_chain(st.session_state.model_name)
+                st.session_state.qa_chain = setup_qa_chain(
+                    st.session_state.vector_store,
+                    st.session_state.model_name
+                )
             except Exception as e:
                 st.error(f"⚠️ Error initializing AI system: {str(e)}")
-                st.error("Please ensure you're using the latest libraries: pip install -U langchain-google-genai")
+                st.error("Please ensure you're using the latest libraries")
                 st.stop()
         
         user_query = st.chat_input("Ask about your PDFs...")
@@ -234,4 +240,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
