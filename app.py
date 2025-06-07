@@ -21,14 +21,17 @@ def setup_environment():
     return api_key
 
 # PDF Processing Functions
+import fitz  # PyMuPDF
+
 def extract_pdf_text(pdf_files):
-    """Extract text from multiple PDFs with page numbers"""
+    """Extract text from multiple PDFs using PyMuPDF"""
     text = ""
     for pdf_file in pdf_files:
-        pdf_reader = PdfReader(pdf_file)
-        for page_num, page in enumerate(pdf_reader.pages):
-            if page_text := page.extract_text():
-                text += f"--- Page {page_num+1} ---\n{page_text}\n\n"
+        # Create a BytesIO object from the uploaded file
+        doc = fitz.open(stream=pdf_file.getvalue(), filetype="pdf")
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            text += f"--- Page {page_num+1} ---\n{page.get_text()}\n\n"
     return text
 
 def chunk_text(text, chunk_size=800, chunk_overlap=150):
@@ -42,10 +45,38 @@ def chunk_text(text, chunk_size=800, chunk_overlap=150):
 
 def create_vector_store(text_chunks):
     """Create and save FAISS vector store safely"""
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
-    vector_store.save_local("pdf_faiss_index")
-    return vector_store
+    try:
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
+        vector_store.save_local("pdf_faiss_index")
+        return vector_store
+    except Exception as e:
+        st.error(f"❌ Error creating vector store: {str(e)}")
+        st.error("This is usually caused by:")
+        st.error("- Invalid Google API key")
+        st.error("- PDFs with scanned images (non-text content)")
+        st.error("- Large PDF files that exceed memory limits")
+        return None
+
+def load_vector_store(embeddings):
+    """Load vector store with error handling and fallback"""
+    try:
+        # First try to load existing vector store
+        return FAISS.load_local(
+            "pdf_faiss_index", 
+            embeddings, 
+            allow_dangerous_deserialization=True
+        )
+    except Exception as e:
+        st.warning(f"⚠️ Vector store loading failed: {str(e)}")
+        
+        # If we have text chunks in session state, try to recreate
+        if "text_chunks" in st.session_state and st.session_state.text_chunks:
+            st.info("Attempting to recreate vector store from text chunks...")
+            return create_vector_store(st.session_state.text_chunks)
+        
+        st.error("Could not recover vector store. Please reprocess your PDFs.")
+        return None
 
 # QA System Setup
 def setup_qa_chain(model_name="gemini-1.5-flash"):
