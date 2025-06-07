@@ -1,7 +1,7 @@
 streamlit==1.35.0
 PyPDF2==3.0.1
 langchain==0.2.1
-langchain-google-genai==0.0.11  # Compatible version
+langchain-google-genai==0.1.0  # Updated version
 faiss-cpu==1.8.0
 python-dotenv==1.0.1
-google-generativeai==0.6.2
+google-generativeai==0.7.0    # Compatible with langchain-google-genai 0.1.0

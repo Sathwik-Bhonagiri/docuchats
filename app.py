@@ -11,30 +11,27 @@ from datetime import datetime
 
 # Initialize environment
 def setup_environment():
-    # Try Streamlit secrets first (for cloud deployment)
-    try:
-        if 'GOOGLE_API_KEY' in st.secrets:
-            api_key = st.secrets['GOOGLE_API_KEY']
-            os.environ['GOOGLE_API_KEY'] = api_key
-            return api_key
-    except:
-        pass
+    # Try Streamlit secrets first
+    if 'GOOGLE_API_KEY' in st.secrets:
+        os.environ['GOOGLE_API_KEY'] = st.secrets['GOOGLE_API_KEY']
+        return
     
     # Try environment variables
-    if api_key := os.getenv('GOOGLE_API_KEY'):
-        return api_key
+    if os.getenv('GOOGLE_API_KEY'):
+        return
         
-    # Try .env file (for local development)
+    # Try .env file
     try:
         from dotenv import load_dotenv
         load_dotenv()
-        if api_key := os.getenv('GOOGLE_API_KEY'):
-            return api_key
+        if os.getenv('GOOGLE_API_KEY'):
+            return
     except:
         pass
 
-    st.error("Google API Key not found! Please configure it in secrets.toml or .env file")
-    st.stop()
+    # Show error in sidebar instead of stopping app
+    st.sidebar.error("Google API Key not found! Some features disabled")
+    return None
 
 # PDF Processing Functions
 def extract_pdf_text(pdf_files):
@@ -103,11 +100,7 @@ def setup_qa_chain(model_name="gemini-1.5-flash"):
     
     # Load vector store with safe deserialization
     try:
-        vector_store = FAISS.load_local(
-            "pdf_faiss_index", 
-            embeddings, 
-            allow_dangerous_deserialization=True
-        )
+        vector_store = FAISS.load_local("pdf_faiss_index", embeddings)
     except:
         st.error("Vector store not found! Please process PDFs first.")
         st.stop()
