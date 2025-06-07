@@ -7,35 +7,54 @@ from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 import os
 import time
-import logging
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from datetime import datetime
 
 # Initialize environment
 def setup_environment():
-    if not os.getenv("GOOGLE_API_KEY"):
+    # Try Streamlit secrets first (for cloud deployment)
+    try:
+        if 'GOOGLE_API_KEY' in st.secrets:
+            api_key = st.secrets['GOOGLE_API_KEY']
+            os.environ['GOOGLE_API_KEY'] = api_key
+            return api_key
+    except:
+        pass
+    
+    # Try environment variables
+    if api_key := os.getenv('GOOGLE_API_KEY'):
+        return api_key
+        
+    # Try .env file (for local development)
+    try:
         from dotenv import load_dotenv
         load_dotenv()
-    api_key = os.getenv("GOOGLE_API_KEY")
-    assert api_key, "Google API Key not found in environment variables!"
-    os.environ["GOOGLE_API_KEY"] = api_key
-    return api_key
+        if api_key := os.getenv('GOOGLE_API_KEY'):
+            return api_key
+    except:
+        pass
+
+    st.error("Google API Key not found! Please configure it in secrets.toml or .env file")
+    st.stop()
 
 # PDF Processing Functions
 def extract_pdf_text(pdf_files):
     """Extract text from multiple PDFs with page numbers"""
     text = ""
     for pdf_file in pdf_files:
-        pdf_reader = PdfReader(pdf_file)
-        for page_num, page in enumerate(pdf_reader.pages):
-            if page_text := page.extract_text():
-                text += f"--- Page {page_num+1} ---\n{page_text}\n\n"
+        try:
+            pdf_reader = PdfReader(pdf_file)
+            for page_num, page in enumerate(pdf_reader.pages):
+                if page_text := page.extract_text():
+                    text += f"--- Page {page_num+1} ---\n{page_text}\n\n"
+        except Exception as e:
+            st.error(f"Error reading {pdf_file.name}: {str(e)}")
     return text
 
 def chunk_text(text, chunk_size=800, chunk_overlap=150):
     """Split text into manageable chunks with optimized size"""
+    if not text.strip():
+        return []
+        
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
@@ -45,6 +64,9 @@ def chunk_text(text, chunk_size=800, chunk_overlap=150):
 
 def create_vector_store(text_chunks):
     """Create and save FAISS vector store safely"""
+    if not text_chunks:
+        raise ValueError("No text chunks to process!")
+        
     embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
     vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
     vector_store.save_local("pdf_faiss_index")
@@ -80,11 +102,15 @@ def setup_qa_chain(model_name="gemini-1.5-flash"):
     embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
     
     # Load vector store with safe deserialization
-    vector_store = FAISS.load_local(
-        "pdf_faiss_index", 
-        embeddings, 
-        allow_dangerous_deserialization=True
-    )
+    try:
+        vector_store = FAISS.load_local(
+            "pdf_faiss_index", 
+            embeddings, 
+            allow_dangerous_deserialization=True
+        )
+    except:
+        st.error("Vector store not found! Please process PDFs first.")
+        st.stop()
     
     return RetrievalQA.from_chain_type(
         llm=model,
@@ -104,7 +130,6 @@ def main():
         page_icon="📄"
     )
     st.title("📄 Chat with PDFs using Gemini")
-    st.caption("Upload PDFs, ask questions, get instant answers")
     
     # Initialize session state
     if "processed" not in st.session_state:
@@ -112,6 +137,8 @@ def main():
         st.session_state.qa_chain = None
         st.session_state.quota_warning = False
         st.session_state.model_name = "gemini-1.5-flash"
+        st.session_state.chat_history = []
+        st.session_state.processing_metrics = {}
     
     # Sidebar for configuration
     with st.sidebar:
@@ -141,19 +168,57 @@ def main():
         process_button = st.button("Process PDFs", disabled=not pdf_files)
         if process_button and pdf_files:
             with st.status("Processing documents..."):
-                # Extract and process text
-                st.write("📖 Reading PDF content...")
-                raw_text = extract_pdf_text(pdf_files)
-                
-                st.write("✂️ Splitting text into chunks...")
-                text_chunks = chunk_text(raw_text)
-                
-                st.write("🧠 Creating knowledge base...")
-                create_vector_store(text_chunks)
-                
-                st.session_state.processed = True
-                st.session_state.quota_warning = False
-                st.success("✅ PDFs processed successfully! You can now ask questions.")
+                try:
+                    # Extract and process text
+                    st.write("📖 Reading PDF content...")
+                    raw_text = extract_pdf_text(pdf_files)
+                    
+                    if not raw_text.strip():
+                        st.error("No text extracted from PDFs! Please check your files.")
+                        st.stop()
+                    
+                    # Calculate processing metrics
+                    char_count = len(raw_text)
+                    page_count = sum(1 for pdf in pdf_files for _ in PdfReader(pdf).pages)
+                    file_count = len(pdf_files)
+                    
+                    st.write("✂️ Splitting text into chunks...")
+                    text_chunks = chunk_text(raw_text)
+                    chunk_count = len(text_chunks)
+                    
+                    if not text_chunks:
+                        st.error("Failed to split text into chunks!")
+                        st.stop()
+                    
+                    st.write("🧠 Creating knowledge base...")
+                    create_vector_store(text_chunks)
+                    
+                    # Store processing metrics
+                    st.session_state.processing_metrics = {
+                        "characters": char_count,
+                        "chunks": chunk_count,
+                        "pages": page_count,
+                        "files": file_count,
+                        "processed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    }
+                    
+                    st.session_state.processed = True
+                    st.session_state.quota_warning = False
+                    st.session_state.chat_history = []  # Clear chat history on new processing
+                    st.success("✅ PDFs processed successfully! You can now ask questions.")
+                except Exception as e:
+                    st.error(f"Processing failed: {str(e)}")
+                    st.session_state.processed = False
+        
+        # Display processing metrics
+        if st.session_state.processed and st.session_state.processing_metrics:
+            st.subheader("Processing Metrics")
+            metrics = st.session_state.processing_metrics
+            st.metric("Total Files", metrics["files"])
+            st.metric("Total Pages", metrics["pages"])
+            st.metric("Characters Processed", f"{metrics['characters']:,}")
+            st.metric("Text Chunks Created", metrics["chunks"])
+            st.caption(f"Processed at: {metrics['processed_at']}")
                 
         # Reset button
         if st.button("🔄 Reset Session"):
@@ -168,7 +233,50 @@ def main():
                 "Upgrade at [Google AI Studio](https://aistudio.google.com/)")
 
     # Main chat interface
-    if st.session_state.processed:
+    chat_container = st.container()
+    
+    # Display chat history
+    with chat_container:
+        st.subheader("Chat History")
+        
+        if not st.session_state.chat_history:
+            st.info("💬 Your chat history will appear here. Start by asking a question!")
+        
+        # Display chat history in reverse order (newest at bottom)
+        for i, chat in enumerate(reversed(st.session_state.chat_history)):
+            with st.expander(f"Q: {chat['question'][:50]}...", expanded=(i==0)):
+                # User question
+                with st.chat_message("user", avatar="🧑‍💻"):
+                    st.write(chat["question"])
+                    st.caption(chat["timestamp"])
+                
+                # Assistant response
+                with st.chat_message("assistant", avatar="🤖"):
+                    st.write(chat["answer"])
+                    
+                    # Source information
+                    if chat.get("sources"):
+                        st.markdown("**Sources used:**")
+                        for source in chat["sources"]:
+                            st.caption(f"📄 {source}")
+                    
+                    st.caption(f"⏱️ Response time: {chat['response_time']:.1f}s | Model: {st.session_state.model_name}")
+    
+    # Question input at bottom
+    user_query = st.chat_input("Ask about your PDFs...", key="chat_input")
+    
+    if user_query and st.session_state.processed:
+        # Add user question to history immediately
+        new_chat = {
+            "question": user_query,
+            "answer": "",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "response_time": 0,
+            "sources": []
+        }
+        st.session_state.chat_history.append(new_chat)
+        
+        # Process the question
         if not st.session_state.qa_chain:
             try:
                 st.session_state.qa_chain = setup_qa_chain(st.session_state.model_name)
@@ -177,44 +285,32 @@ def main():
                 st.error("Please ensure you're using the latest libraries: pip install -U langchain-google-genai")
                 st.stop()
         
-        user_query = st.chat_input("Ask about your PDFs...")
-        if user_query:
-            st.chat_message("user").write(user_query)
-            
-            with st.spinner("🔍 Searching documents..."):
-                try:
-                    start_time = time.time()
-                    response = st.session_state.qa_chain({"query": user_query})
-                    processing_time = time.time() - start_time
-                    
-                    with st.chat_message("assistant", avatar="🤖"):
-                        st.write(response["result"])
-                        st.caption(f"⏱️ Response time: {processing_time:.1f} seconds | Model: {st.session_state.model_name}")
-                        
-                        # Show source pages
-                        if response["source_documents"]:
-                            with st.expander("🔍 Source Information"):
-                                for i, doc in enumerate(response["source_documents"]):
-                                    page_content = doc.page_content[:300] + "..." if len(doc.page_content) > 300 else doc.page_content
-                                    st.caption(f"**Source {i+1}**")
-                                    st.info(page_content)
-                except Exception as e:
-                    if "quota" in str(e).lower() or "429" in str(e):
-                        st.error("⚠️ API Quota Exceeded - You've hit the free tier limits")
-                        st.error("Please try again later or upgrade your Google Cloud account")
-                        st.session_state.quota_warning = True
-                    else:
-                        st.error(f"❌ Error processing your question: {str(e)}")
-    
-    # Quota warning display
-    if st.session_state.get("quota_warning", False):
-        st.warning("📢 You've exceeded your free tier quota. Here are your options:")
-        st.markdown("""
-        1. **⏳ Wait 1 minute** - Free tier resets every minute
-        2. **💳 Upgrade your account** - [Google AI Studio Pricing](https://ai.google.dev/pricing)
-        3. **🔑 Use a different API key** - If you have multiple projects
-        4. **📉 Reduce usage** - Ask fewer questions or switch to Flash model
-        """)
+        with st.spinner("🔍 Searching documents..."):
+            try:
+                start_time = time.time()
+                response = st.session_state.qa_chain({"query": user_query})
+                processing_time = time.time() - start_time
+                
+                # Update the latest chat entry
+                st.session_state.chat_history[-1]["answer"] = response["result"]
+                st.session_state.chat_history[-1]["response_time"] = processing_time
+                
+                # Extract sources
+                sources = set()
+                for doc in response["source_documents"]:
+                    source = f"Page {doc.metadata.get('page', 'N/A')} - {doc.page_content[:100]}..."
+                    sources.add(source)
+                st.session_state.chat_history[-1]["sources"] = list(sources)
+                
+                # Rerun to update chat display
+                st.rerun()
+                
+            except Exception as e:
+                st.session_state.chat_history[-1]["answer"] = f"Error: {str(e)}"
+                if "quota" in str(e).lower() or "429" in str(e):
+                    st.session_state.chat_history[-1]["answer"] = "⚠️ API Quota Exceeded - Please try again later"
+                    st.session_state.quota_warning = True
+                st.rerun()
     
     # Initial instructions
     if not st.session_state.processed:
@@ -234,4 +330,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    #...
